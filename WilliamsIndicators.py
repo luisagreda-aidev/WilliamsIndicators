@@ -1,313 +1,243 @@
-import matplotlib as mpl
-mpl.use('TkAgg')
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 
-class WilliamsIndicators(object):
+# Es una buena práctica configurar el backend al principio del script.
+# Si se ejecuta en un entorno sin GUI (como un servidor o notebook),
+# 'Agg' es una mejor opción que 'TkAgg'.
+# mpl.use('TkAgg') 
 
-    def __init__(self, candles):
-        self.candles_all_time = candles
+class WilliamsIndicators:
+    """
+    Calcula un conjunto de indicadores técnicos de Bill Williams sobre un DataFrame de velas.
 
+    Esta clase toma un DataFrame de pandas con datos OHLCV y calcula:
+    - Alligator (Mandíbula, Dientes, Labios)
+    - Awesome Oscillator (AO)
+    - Accelerator Oscillator (AC)
+    - Barras Divergentes (Bullish/Bearish)
+    - Ventanas de Profitunity (Basado en MFI)
 
-    def check_bull_bar_dataframe(self, candles_2rows_dataframe):
-        '''
-        checks if current bar is bull divergent bar
-        :return True if current bar is bull divergent bar, else False
-        :param candles_2rows_dataframe: dataframe that consists of two rows of candles in chronological order, created by get_num_rows(self, n)
-        '''
+    El método principal es `calculate_all()`, que procesa los datos y devuelve
+    un DataFrame con todos los indicadores añadidos como nuevas columnas.
+    """
 
-        # check if current bar is bull divergent bar.
-        if float(candles_2rows_dataframe['Low'][0]) > float(candles_2rows_dataframe['Low'][1]) and \
-                float(candles_2rows_dataframe['Close'][1]) > \
-                (float(candles_2rows_dataframe['High'][1]) + float(candles_2rows_dataframe['Low'][1])) / 2:
-                    return True
-        else:
-            return False
+    def __init__(self, candles_df: pd.DataFrame):
+        """
+        Inicializa la clase con el DataFrame de velas.
 
-    def check_bull_bar(self, candles_2rows_list):
-        '''
-        checks if current bar is bull divergent bar
-        :return True if current bar is bull divergent bar, else False
-        :param candles_2rows_dataframe: dataframe that consists of two rows of candles in chronological order, created by get_num_rows(self, n)
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        '''
+        Args:
+            candles_df (pd.DataFrame): DataFrame que debe contener las columnas
+                                      'Open', 'High', 'Low', 'Close', 'Volume'.
+                                      Las columnas se esperan en minúsculas por convención.
+        """
+        # Hacemos una copia para no modificar el DataFrame original
+        self.data = candles_df.copy()
+        
+        # Estandarizar nombres de columnas a minúsculas para consistencia
+        self.data.columns = [col.lower() for col in self.data.columns]
+        
+        required_cols = {'open', 'high', 'low', 'close', 'volume'}
+        if not required_cols.issubset(self.data.columns):
+            raise ValueError(f"El DataFrame debe contener las columnas: {required_cols}")
 
-        # check if current bar is bull divergent bar.
-        if float(candles_2rows_list[0][3]) > float(candles_2rows_list[1][3]) and \
-                float(candles_2rows_list[1][4]) > \
-                (float(candles_2rows_list[1][2]) + float(candles_2rows_list[1][3])) / 2:
-                    return True
-        else:
-            return False
+    def _smma(self, series: pd.Series, period: int) -> pd.Series:
+        """
+        Calcula la Media Móvil Suavizada (Smoothed Moving Average - SMMA/RMA).
+        Pandas ewm(alpha=1/period) es la implementación correcta y eficiente.
+        """
+        return series.ewm(alpha=1/period, adjust=False).mean()
 
+    def _calculate_alligator(self):
+        """Calcula las tres líneas del Alligator y las añade al DataFrame."""
+        median_price = (self.data['high'] + self.data['low']) / 2
+        
+        # Mandíbula (Jaw) - Línea azul
+        jaw = self._smma(median_price, 13).shift(8)
+        
+        # Dientes (Teeth) - Línea roja
+        teeth = self._smma(median_price, 8).shift(5)
+        
+        # Labios (Lips) - Línea verde
+        lips = self._smma(median_price, 5).shift(3)
+        
+        self.data['alligator_jaw'] = jaw
+        self.data['alligator_teeth'] = teeth
+        self.data['alligator_lips'] = lips
 
-    def check_bear_bar(self, candles_2rows_list):
-        '''
-        checks if current bar is bear divergent bar
-        :return True if current bar is bear divergent bar, else False
-        :param candles_2rows_dataframe: dataframe that consists of two rows of candles in chronological order, created by get_num_rows(self, n)
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        '''
+    def _calculate_ao_ac(self):
+        """Calcula el Awesome Oscillator (AO) y el Accelerator Oscillator (AC)."""
+        median_price = (self.data['high'] + self.data['low']) / 2
+        
+        # Awesome Oscillator (AO)
+        sma5 = median_price.rolling(window=5).mean()
+        sma34 = median_price.rolling(window=34).mean()
+        self.data['awesome_oscillator'] = sma5 - sma34
+        
+        # Accelerator Oscillator (AC)
+        sma5_ao = self.data['awesome_oscillator'].rolling(window=5).mean()
+        self.data['accelerator_oscillator'] = self.data['awesome_oscillator'] - sma5_ao
 
-        if float(candles_2rows_list[0][2]) < float(candles_2rows_list[1][2]) and \
-                float(candles_2rows_list[1][4]) < \
-                (float(candles_2rows_list[1][2]) + float(candles_2rows_list[1][3])) / 2:
-            return True
-        else:
-            return False
+    def _calculate_divergent_bars(self):
+        """Identifica barras divergentes alcistas (bullish) y bajistas (bearish)."""
+        prev_low = self.data['low'].shift(1)
+        prev_high = self.data['high'].shift(1)
+        
+        # Barra divergente alcista (Bullish Divergent Bar)
+        # Mínimo actual más bajo que el anterior, y el cierre está en la mitad superior de la barra.
+        is_bull_divergent = (self.data['low'] < prev_low) & \
+                            (self.data['close'] > (self.data['high'] + self.data['low']) / 2)
+        self.data['is_bull_divergent_bar'] = is_bull_divergent
 
+        # Barra divergente bajista (Bearish Divergent Bar)
+        # Máximo actual más alto que el anterior, y el cierre está en la mitad inferior de la barra.
+        is_bear_divergent = (self.data['high'] > prev_high) & \
+                            (self.data['close'] < (self.data['high'] + self.data['low']) / 2)
+        self.data['is_bear_divergent_bar'] = is_bear_divergent
 
-    def check_bear_bar_dataframe(self, candles_2rows_dataframe):
-        '''
-        checks if current bar is bear divergent bar
-        :return True if current bar is bear divergent bar, else False
-        :param candles_2rows_dataframe: dataframe that consists of two rows of candles in chronological order, created by get_num_rows(self, n)
-        '''
+    def _calculate_profitunity_windows(self):
+        """
+        Calcula las "ventanas de profitunity" basadas en el MFI y el volumen.
+        - Green: MFI y Volumen suben.
+        - Squat: MFI sube, Volumen baja.
+        - Fade: MFI y Volumen bajan.
+        - Fake: MFI baja, Volumen sube.
+        """
+        mfi = (self.data['high'] - self.data['low']) / self.data['volume']
+        mfi = mfi.replace([np.inf, -np.inf], np.nan) # Evitar división por cero
 
-        if float(candles_2rows_dataframe['High'][0]) < float(candles_2rows_dataframe['High'][1]) and \
-                float(candles_2rows_dataframe['Close'][1]) < \
-                (float(candles_2rows_dataframe['High'][1]) + float(candles_2rows_dataframe['Low'][1])) / 2:
-            return True
-        else:
-            return False
+        mfi_up = mfi > mfi.shift(1)
+        volume_up = self.data['volume'] > self.data['volume'].shift(1)
 
+        conditions = [
+            mfi_up & volume_up,
+            mfi_up & ~volume_up,
+            ~mfi_up & ~volume_up,
+            ~mfi_up & volume_up
+        ]
+        choices = ['green', 'squat', 'fade', 'fake']
+        
+        self.data['profitunity_window'] = np.select(conditions, choices, default=None)
 
-    def SMMA(self, candles_list, n_smoothing_periods, future_shift):
-        '''
-        :param candles_list: list with candles to get median prices
-                candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-                candles_list is at least as long as future_shift
+    def calculate_all(self) -> pd.DataFrame:
+        """
+        Ejecuta todos los cálculos de indicadores y devuelve el DataFrame completo.
 
-        :param n_smoothing_periods: amount of periods for calculating moving average
-        :return: list of SMMAs from n_smoothing_periods position to the (end of list + future_shift)
-                elements 0-5 are sma of previouse periods, 6 - SMA for current periods - the rest - future_shift
-        '''
+        Returns:
+            pd.DataFrame: El DataFrame original con columnas adicionales para cada indicador.
+        """
+        if len(self.data) < 34:
+            # 34 es el periodo más largo usado (para el AO)
+            raise ValueError("Se necesitan al menos 34 periodos (filas) de datos.")
+            
+        print("Calculando Alligator...")
+        self._calculate_alligator()
+        
+        print("Calculando Awesome Oscillator y Accelerator Oscillator...")
+        self._calculate_ao_ac()
+        
+        print("Identificando Barras Divergentes...")
+        self._calculate_divergent_bars()
+        
+        print("Calculando Ventanas de Profitunity...")
+        self._calculate_profitunity_windows()
+        
+        print("Cálculos completados.")
+        return self.data
 
-        if len(candles_list) < n_smoothing_periods:
-            print('too short')
-            return
+    def plot_alligator(self, num_records: int = 100):
+        """
+        Grafica el indicador Alligator junto con el precio de cierre.
 
-        #create a list of median prices
-        self.median_prices_list = []
-        for i in range(len(candles_list)):
-            median_price = (float(candles_list[i][2]) + float(candles_list[i][3])) / 2  # (high + low) / 2
-            self.median_prices_list.append(median_price)
+        Args:
+            num_records (int): Número de los últimos registros a graficar.
+        """
+        subset = self.data.tail(num_records).copy()
+        subset.reset_index(inplace=True) # Usar un índice numérico para el eje x
 
-        #print(len('median prices list', self.median_prices_list))
+        plt.figure(figsize=(15, 7))
+        plt.title(f'Bill Williams Alligator - Últimos {num_records} periodos')
+        
+        # Graficar precios
+        plt.plot(subset['close'], label='Precio de Cierre', color='black', alpha=0.7)
+        
+        # Graficar Alligator
+        plt.plot(subset['alligator_jaw'], label='Jaw (13, shift 8)', color='blue')
+        plt.plot(subset['alligator_teeth'], label='Teeth (8, shift 5)', color='red')
+        plt.plot(subset['alligator_lips'], label='Lips (5, shift 3)', color='green')
+        
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.ylabel('Precio')
+        plt.xlabel('Periodo')
+        plt.show()
 
-        self.start_len = len(self.median_prices_list)
+    def plot_oscillators(self, num_records: int = 100):
+        """
+        Grafica el Awesome Oscillator (AO) y el Accelerator Oscillator (AC).
 
-        for i in range(n_smoothing_periods, len(candles_list) + future_shift):
-            #print(self.median_prices_list[-n_smoothing_periods:-1])
-            sum_prices = sum(self.median_prices_list[i-n_smoothing_periods:i])
-            smma = sum_prices / n_smoothing_periods
-            self.median_prices_list.append(smma)
+        Args:
+            num_records (int): Número de los últimos registros a graficar.
+        """
+        subset = self.data.tail(num_records).copy()
+        subset.reset_index(inplace=True, drop=True)
 
-        #print('median_prices_list after smma add', len(self.median_prices_list))
-        return self.median_prices_list[-(self.start_len + n_smoothing_periods): -1]
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
+        fig.suptitle(f'Osciladores de Bill Williams - Últimos {num_records} periodos')
 
-    def alligator_plot(self, candles_list):
-        #plot alligator lines for candles_list
+        # Awesome Oscillator (AO)
+        colors_ao = ['green' if val >= 0 else 'red' for val in subset['awesome_oscillator']]
+        ax1.bar(subset.index, subset['awesome_oscillator'], color=colors_ao, label='AO')
+        ax1.axhline(0, color='grey', linestyle='--')
+        ax1.set_title('Awesome Oscillator (AO)')
+        ax1.grid(True, linestyle='--', alpha=0.5)
+        ax1.legend()
 
-        jaw = self.SMMA(candles_list, 13, 8)
-        teeth = self.SMMA(candles_list, 8, 5)
-        lips = self.SMMA(candles_list, 5, 3)
-
-
-        # plot
-        plt.figure('Alligator')
-        plt.clf()
-        plt.plot(jaw, color='blue')
-        plt.plot(teeth, color='red')
-        plt.plot(lips, color = 'green')
-        plt.plot(self.median_prices_list[13:len(candles_list)], color ='black')
+        # Accelerator Oscillator (AC)
+        colors_ac = ['green' if val >= 0 else 'red' for val in subset['accelerator_oscillator']]
+        ax2.bar(subset.index, subset['accelerator_oscillator'], color=colors_ac, label='AC')
+        ax2.axhline(0, color='grey', linestyle='--')
+        ax2.set_title('Accelerator Oscillator (AC)')
+        ax2.grid(True, linestyle='--', alpha=0.5)
+        ax2.legend()
+        
+        plt.xlabel('Periodo')
         plt.show()
 
 
-    def alligator_calculate(self):
-        '''
-        Calculates alligator jaw, teeth and lips and returns them as self.jaw etc.
-        :return: self.jaw, self.teeth, self.lips
-        '''
+# --- Ejemplo de Uso ---
+if __name__ == '__main__':
+    # 1. Crear un DataFrame de ejemplo con datos de velas
+    print("Creando datos de ejemplo...")
+    np.random.seed(42)
+    num_candles = 200
+    prices = 100 + np.random.randn(num_candles).cumsum()
+    sample_data = pd.DataFrame({
+        'Open': prices + np.random.uniform(-0.5, 0.5, num_candles),
+        'High': prices + np.random.uniform(0, 1, num_candles),
+        'Low': prices - np.random.uniform(0, 1, num_candles),
+        'Close': prices + np.random.uniform(-0.5, 0.5, num_candles),
+        'Volume': np.random.randint(1000, 5000, num_candles)
+    })
+    # Asegurarse de que High sea el más alto y Low el más bajo
+    sample_data['High'] = sample_data[['Open', 'High', 'Low', 'Close']].max(axis=1)
+    sample_data['Low'] = sample_data[['Open', 'High', 'Low', 'Close']].min(axis=1)
 
-        # обрахунок алігатора за весь період
-        jaw = self.SMMA(self.candles_all_time, 13, 8)
-        teeth = self.SMMA(self.candles_all_time, 8, 5)
-        lips = self.SMMA(self.candles_all_time, 5, 3)
+    # 2. Instanciar la clase con los datos
+    print("\nInicializando la clase WilliamsIndicators...")
+    indicator_calculator = WilliamsIndicators(sample_data)
 
+    # 3. Calcular todos los indicadores
+    results_df = indicator_calculator.calculate_all()
 
-    def alligator_distance_between_lines(self):
-        '''
-
-        :return: info if alligator sleeps or awake, if return is bigger than 1, distance between alligator lines is more tha average
-        '''
-
-        #distance between max and min alligator values
-        self.distance_list = []
-        for i in range(14):
-            distance = max(self.jaw[i], self.teeth[i], self.lips[i]) - min(self.jaw[i], self.teeth[i], self.lips[i])
-            self.distance_list.append(distance)
-
-        # середнє відхилення між лініями алігатора
-        average_distance = sum(self.distance_list) / len(self.distance_list)
-
-        jaw_last_candles_trend = []
-        teeth_last_candles_trend = []
-        lips_last_candles_trend = []
-
-        for i in range(1, 6):
-            last_jaw_diff = self.jaw[-i] - self.jaw[-i-1]
-            last_teeth_diff = self.teeth[-i] - self.teeth[-i-1]
-            last_lips_diff = self.lips[-i] - self.lips[-i-1]
-
-            jaw_last_candles_trend.append(last_jaw_diff)
-            teeth_last_candles_trend.append(last_teeth_diff)
-            lips_last_candles_trend.append(last_lips_diff)
-
-        alligator_distances_dict = {}
-        alligator_distances_dict['CurrentTrendValue'] = sum(self.distance_list[-6:-1]) / (average_distance * 5)
-        alligator_distances_dict['jaw_last_candles_trend(13/8)'] = jaw_last_candles_trend
-        alligator_distances_dict['teeth_last_candles_trend(8/5)'] = teeth_last_candles_trend
-        alligator_distances_dict['lips_last_candles_trend(5/3)'] = lips_last_candles_trend
-
-        return alligator_distances_dict
-
-
-    def distance_between_alligator_and_candles(self, two_candles_list, two_candles_index):
-        '''
-        :param two_candles_list: list of two candles
-        :param two_candles_index: index of the first of two candles in self.all_candles
-        :return: True if alligator lines are outside given candles
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        '''
-
-        #get alligator lines data
-        if two_candles_index < 18:
-            return False
-
-        jaw_candles = self.candles_all_time[two_candles_index - 18: two_candles_index + 2]
-        teeth_candles = self.candles_all_time[two_candles_index - 16: two_candles_index + 2]
-        lips_candles = self.candles_all_time[two_candles_index - 15: two_candles_index + 2]
-        last_2_jaw_values = self.SMMA(jaw_candles, 13, 8)
-        last_2_teeth_values = self.SMMA(teeth_candles, 8, 5)
-        last_2_lips_values = self.SMMA(lips_candles, 5, 3)
-
-        min_alligator_value = min(last_2_jaw_values[-1], last_2_teeth_values[-1], last_2_lips_values[-1])
-        max_alligator_value = max(last_2_jaw_values[-1], last_2_teeth_values[-1], last_2_lips_values[-1])
-
-
-        #if alligator min or max values do not cross the last candle - indicator is valid
-        if  float(two_candles_list[-1][3]) < min_alligator_value or \
-            max_alligator_value > float(two_candles_list[-1][2]):
-            return True
-        else:
-            return False
-
-
-    def check_bar_type(self, two_candles_list):
-        '''
-        :param two_candles_list:
-        :return: a bar type like 13, 23, 11 etc.
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        Logic: first number - 1 if open is in upper 1/3 of high-low, range, 3 - in lower
-        '''
-
-        bar_type = ''
-
-        one_third = (float(two_candles_list[1][2]) - float(two_candles_list[1][3])) / 3
-
-        #compare open price
-        if float(two_candles_list[1][1]) < float(two_candles_list[1][3]) + one_third:
-            bar_type += '1'
-        elif float(two_candles_list[1][3]) + 2 * one_third < float(two_candles_list[1][1]) < float(two_candles_list[1][3]) + 3 * one_third:
-            bar_type += '3'
-        else:
-            bar_type += '2'
-
-        #compare close price
-        if float(two_candles_list[1][4]) < float(two_candles_list[1][3]) + one_third:
-            bar_type += '1'
-        elif float(two_candles_list[1][3]) + 2 * one_third < float(two_candles_list[1][4]) < float(two_candles_list[1][3]) + 3 * one_third:
-            bar_type += '3'
-        else:
-            bar_type += '2'
-
-
-        return bar_type
-
-
-    def trend_direction(self, two_candles_list):
-        '''
-        :param two_candles_list:
-        :return: + if trend goes up, - if trend goes down and 0 if no change
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        '''
-
-        if (float(two_candles_list[1][2]) + float(two_candles_list[1][3])) / 2 > float(two_candles_list[0][2]):
-            return '+'
-        elif (float(two_candles_list[1][2]) + float(two_candles_list[1][3])) / 2 < float(two_candles_list[0][3]):
-            return '-'
-        else:
-            return '0'
-
-
-    def profitunity_windows(self, two_candles_list):
-        '''
-        :param two_candles_list:
-        :return: one of four window types: green, squat, fake, fade
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-        '''
-        if float(two_candles_list[0][5]) == 0 or float(two_candles_list[1][5]) == 0:
-            return
-
-        MFI_0 = (float(two_candles_list[0][2]) - float(two_candles_list[0][3])) / float(two_candles_list[0][5])
-        MFI_1 = (float(two_candles_list[1][2]) - float(two_candles_list[1][3])) / float(two_candles_list[1][5])
-
-        if MFI_1 > MFI_0 and float(two_candles_list[1][5]) > float(two_candles_list[0][5]):
-            return 'green'
-        elif MFI_1 > MFI_0 and float(two_candles_list[1][5]) < float(two_candles_list[0][5]):
-            return 'squat'
-        elif MFI_1 < MFI_0 and float(two_candles_list[1][5]) < float(two_candles_list[0][5]):
-            return 'fade'
-        elif MFI_1 < MFI_0 and float(two_candles_list[1][5]) > float(two_candles_list[0][5]):
-            return 'fake'
-
-
-    def angularation(self, two_candles_index):
-        '''
-        :param two_candles_indes: index of next-to-last candle
-        :return:True if there is a significant angularation, else False
-        candles indicies: 0 - Open time, 1 - Open, 2 - High, 3 - Low, 4 - Close, 5 - Volume, 6 - Close time
-
-        We measure distance between last bar mid price and alligator jaw and same distance -10 indexes from this point.
-        It should be greater than 2.5
-        '''
-        #print(len(self.candles_all_time))
-        jaw_candles = self.candles_all_time[two_candles_index - 11: two_candles_index + 2]
-        jaw_values = self.SMMA(jaw_candles, 13, 8)
-
-        dist1 = abs(float(jaw_candles[-1][2]) + float(jaw_candles[-1][3]) - jaw_values[-1])
-        dist2 = abs(float(jaw_candles[-10][2]) + float(jaw_candles[-10][3]) / 2 - jaw_values[-1])
-
-        # print('dist1', dist1)
-        # print('dist2', dist2)
-        # print(dist1 / dist2)
-
-        if dist1 / dist2 > 1.012 or dist1/dist2 < 0.9:
-            #print('True')
-            return True
-
-        return False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # 4. Mostrar los resultados
+    print("\nDataFrame resultante con los indicadores (últimas 10 filas):")
+    # Configurar pandas para mostrar todas las columnas
+    pd.set_option('display.max_columns', None)
+    print(results_df.tail(10))
+    
+    # 5. Graficar los indicadores
+    print("\nGenerando gráficos...")
+    indicator_calculator.plot_alligator(num_records=150)
+    indicator_calculator.plot_oscillators(num_records=150)
